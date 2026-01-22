@@ -823,7 +823,7 @@ _CONFIGS = [
         ),
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
         num_train_steps=20_000,
-        batch_size=64,
+        batch_size=20,
     ),
     #
     # Fine-tuning DROID configs.
@@ -964,6 +964,86 @@ _CONFIGS = [
         overwrite=True,
         exp_name="debug_pi05",
         wandb_enabled=False,
+    ),
+    #
+    # Fine-tuning OpenArm configs.
+    #
+    TrainConfig(
+        name="pi05_openarm",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=16,  # 2 arms × (7 joints + 1 gripper)
+            action_horizon=16,
+            max_token_len=250,  # Bimanual robot needs more tokens
+        ),
+        data=SimpleDataConfig(
+            repo_id="saurabh/openarm_pick_v6",
+            assets=AssetsConfig(
+                # Load norm stats from the computed assets directory
+                asset_id="saurabh/openarm_pick_v6",
+            ),
+            data_transforms=lambda model: _transforms.Group(
+                inputs=[
+                    __import__("openpi.policies.openarm_policy", fromlist=["OpenArmInputs"]).OpenArmInputs(
+                        model_type=ModelType.PI05
+                    )
+                ],
+                outputs=[
+                    __import__("openpi.policies.openarm_policy", fromlist=["OpenArmOutputs"]).OpenArmOutputs()
+                ],
+            ),
+            model_transforms=ModelTransformFactory(),
+            base_config=DataConfig(
+                prompt_from_task=True,
+                action_sequence_keys=("action",),  # Match LeRobot dataset column name
+                repack_transforms=_transforms.Group(
+                    inputs=[
+                        _transforms.RepackTransform(
+                            {
+                                "head": "observation.images.head",
+                                "wrist_left": "observation.images.wrist_left",
+                                "wrist_right": "observation.images.wrist_right",
+                                "state": "observation.state",
+                                "actions": "action",
+                                "prompt": "prompt",  # Pass through prompt from PromptFromLeRobotTask
+                            }
+                        )
+                    ]
+                ),
+            ),
+        ),
+        # JAX Weight Loader (for JAX training)
+        # Use FlexibleCheckpointWeightLoader to handle action_dim mismatch (base=32, openarm=16)
+        weight_loader=weight_loaders.FlexibleCheckpointWeightLoader(
+            "gs://openpi-assets/checkpoints/pi05_base/params"
+        ),
+        # PyTorch Checkpoint (for PyTorch training)
+        # Set to None for JAX training, or path for PyTorch training
+        pytorch_weight_path=None,
+        # ═══════════════════════════════════════════════════════════════════
+        # OPTIMIZED HYPERPARAMETERS for A100 80GB + 24-core CPU
+        # Tuned for ~100 episode dataset (JAX training)
+        # ═══════════════════════════════════════════════════════════════════
+        batch_size=32,              # Reduced from 64 - JAX needs more memory than PyTorch
+        num_workers=8,              # 24 CPU cores available
+        num_train_steps=10_000,     # Tuned for 100 episodes (avoid overfitting)
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=500,       # ~5% of total steps
+            peak_lr=2.5e-5,         # Conservative for better generalization
+            decay_steps=10_000,     # Match num_train_steps
+            decay_lr=2.5e-6,        # 10x lower than peak
+        ),
+        optimizer=_optimizer.AdamW(
+            b1=0.9,
+            b2=0.95,
+            eps=1e-8,
+            weight_decay=1e-5,      # Increased from 1e-10 for regularization
+            clip_gradient_norm=1.0,
+        ),
+        ema_decay=0.999,            # Smooth weights for better generalization
+        log_interval=100,
+        save_interval=2_500,        # Save every 2.5k steps (was 1000)
+        keep_period=5_000,          # Keep checkpoints every 5k (was 1500)
     ),
     # RoboArena & PolaRiS configs.
     *roboarena_config.get_roboarena_configs(),

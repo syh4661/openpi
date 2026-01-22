@@ -19,6 +19,48 @@ import openpi.transforms as _transforms
 T_co = TypeVar("T_co", covariant=True)
 
 
+def _fix_datasets_compatibility():
+    """Monkey-patch datasets library to handle LeRobot v2 'List' feature type."""
+    try:
+        import datasets.features.features
+        
+        # If 'List' is already supported, do nothing
+        if "List" in datasets.features.features._FEATURE_TYPES:
+            return
+
+        logging.info("Patching datasets library for LeRobot v2 compatibility ('List' -> 'Sequence')")
+        
+        # Add 'List' to recognized feature types
+        # treating it as a Sequence which is functionally equivalent for this use case
+        datasets.features.features._FEATURE_TYPES["List"] = datasets.features.features.Sequence
+        
+        # Patch generate_from_dict to verify it handles the dict structure correctly
+        old_generate_from_dict = datasets.features.features.generate_from_dict
+        
+        def new_generate_from_dict(obj):
+            if isinstance(obj, dict) and obj.get("_type") == "List":
+                # LeRobot v2 'List' structure usually has 'dtype' and 'length' (or shape)
+                # but datasets Sequence expects 'feature' and 'length'
+                # If 'feature' is missing, we need to construct it from 'dtype'
+                if "feature" not in obj and "dtype" in obj:
+                    import datasets
+                    # Construct a Value feature from the dtype
+                    obj = obj.copy()
+                    obj["feature"] = {"_type": "Value", "dtype": obj["dtype"]}
+                    # Map shape/length if possible, but Sequence handles length separately
+                    # For now let Sequence handle it via the 'length' key if present
+            
+            return old_generate_from_dict(obj)
+
+        datasets.features.features.generate_from_dict = new_generate_from_dict
+            
+    except Exception as e:
+        logging.warning(f"Failed to patch datasets library: {e}")
+
+# Apply the patch immediately when module is imported
+_fix_datasets_compatibility()
+
+
 class Dataset(Protocol[T_co]):
     """Interface for a dataset with random access."""
 
