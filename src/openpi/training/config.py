@@ -20,6 +20,8 @@ import openpi.models.tokenizer as _tokenizer
 import openpi.policies.aloha_policy as aloha_policy
 import openpi.policies.droid_policy as droid_policy
 import openpi.policies.libero_policy as libero_policy
+import openpi.policies.openarm_policy as openarm_policy
+import openpi.policies.openarm_policy as openarm_policy
 import openpi.shared.download as _download
 import openpi.shared.normalize as _normalize
 import openpi.training.droid_rlds_dataset as droid_rlds_dataset
@@ -640,6 +642,30 @@ _CONFIGS = [
             ),
         ),
     ),
+
+    #
+    # OpenArm bimanual inference config.
+    #
+    TrainConfig(
+        name="pi05_openarm",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=16,
+            action_horizon=16,
+            max_token_len=250,
+        ),
+        data=SimpleDataConfig(
+            assets=AssetsConfig(asset_id="saurabh/openarm_pick_v6"),
+            data_transforms=lambda model: _transforms.Group(
+                inputs=[openarm_policy.OpenArmInputs(model_type=ModelType.PI05)],
+                outputs=[openarm_policy.OpenArmOutputs()],
+            ),
+            base_config=DataConfig(
+                prompt_from_task=False,
+            ),
+        ),
+    ),
+
     #
     # Fine-tuning Libero configs.
     #
@@ -865,7 +891,7 @@ _CONFIGS = [
         name="pi05_full_droid_finetune",
         model=pi0_config.Pi0Config(
             pi05=True,
-            action_dim=32,
+            action_dim=16,
             action_horizon=16,
         ),
         data=RLDSDroidDataConfig(
@@ -899,7 +925,7 @@ _CONFIGS = [
         name="pi05_droid_finetune",
         model=pi0_config.Pi0Config(
             pi05=True,
-            action_dim=32,  # pi05 is trained with 32-dim actions
+            action_dim=16,  # pi05 is trained with 32-dim actions
             action_horizon=16,
         ),
         data=LeRobotDROIDDataConfig(
