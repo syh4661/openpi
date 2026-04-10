@@ -6,9 +6,8 @@ import socket
 import tyro
 
 from openpi.policies import policy as _policy
-from openpi.policies import policy_config as _policy_config
+from openpi.policies import openarm_runtime_contract as _openarm_runtime_contract
 from openpi.serving import websocket_policy_server
-from openpi.training import config as _config
 
 
 class EnvMode(enum.Enum):
@@ -78,6 +77,9 @@ DEFAULT_CHECKPOINT: dict[EnvMode, Checkpoint] = {
 
 def create_default_policy(env: EnvMode, *, default_prompt: str | None = None) -> _policy.Policy:
     """Create a default policy for the given environment."""
+    from openpi.policies import policy_config as _policy_config
+    from openpi.training import config as _config
+
     if checkpoint := DEFAULT_CHECKPOINT.get(env):
         return _policy_config.create_trained_policy(
             _config.get_config(checkpoint.config), checkpoint.dir, default_prompt=default_prompt
@@ -89,6 +91,15 @@ def create_policy(args: Args) -> _policy.Policy:
     """Create a policy from the given arguments."""
     match args.policy:
         case Checkpoint():
+            if args.policy.config == "pi05_openarm":
+                return _openarm_runtime_contract.create_runtime_policy(
+                    config_name=args.policy.config,
+                    checkpoint_dir=args.policy.dir,
+                    default_prompt=args.default_prompt,
+                )
+            from openpi.policies import policy_config as _policy_config
+            from openpi.training import config as _config
+
             return _policy_config.create_trained_policy(
                 _config.get_config(args.policy.config), args.policy.dir, default_prompt=args.default_prompt
             )
