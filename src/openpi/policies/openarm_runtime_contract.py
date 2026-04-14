@@ -25,6 +25,8 @@ class ContractError(ValueError):
 
 
 METADATA_VERSION = "openarm_runtime_contract/v1"
+RUNTIME_CONFIG_ALIAS = "pi05_openarm"
+RUNTIME_CONFIG_NAME = "pi05_openarm_runtime"
 
 STATE_ORDER = (
     "left_joint_1.pos",
@@ -316,6 +318,9 @@ def _load_training_config_module():
 
 def load_openarm_train_config(config_name: str):
     config_module = _load_training_config_module()
+    if config_name == RUNTIME_CONFIG_ALIAS:
+        return config_module.get_config(RUNTIME_CONFIG_NAME)
+
     matches = [config for config in config_module._CONFIGS if config.name == config_name]
     if not matches:
         return config_module.get_config(config_name)

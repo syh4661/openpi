@@ -1,12 +1,17 @@
 from collections.abc import Iterator, Sequence
+import json
 import logging
 import multiprocessing
 import os
+from pathlib import Path
 import typing
 from typing import Literal, Protocol, SupportsIndex, TypeVar
 
+from huggingface_hub import snapshot_download
+from huggingface_hub.errors import RevisionNotFoundError
 import jax
 import jax.numpy as jnp
+from lerobot.common.constants import HF_LEROBOT_HOME
 import lerobot.common.datasets.lerobot_dataset as lerobot_dataset
 import numpy as np
 import torch
@@ -23,20 +28,20 @@ def _fix_datasets_compatibility():
     """Monkey-patch datasets library to handle LeRobot v2 'List' feature type."""
     try:
         import datasets.features.features
-        
+
         # If 'List' is already supported, do nothing
         if "List" in datasets.features.features._FEATURE_TYPES:
             return
 
         logging.info("Patching datasets library for LeRobot v2 compatibility ('List' -> 'Sequence')")
-        
+
         # Add 'List' to recognized feature types
         # treating it as a Sequence which is functionally equivalent for this use case
         datasets.features.features._FEATURE_TYPES["List"] = datasets.features.features.Sequence
-        
+
         # Patch generate_from_dict to verify it handles the dict structure correctly
         old_generate_from_dict = datasets.features.features.generate_from_dict
-        
+
         def new_generate_from_dict(obj):
             if isinstance(obj, dict) and obj.get("_type") == "List":
                 # LeRobot v2 'List' structure usually has 'dtype' and 'length' (or shape)
@@ -44,21 +49,57 @@ def _fix_datasets_compatibility():
                 # If 'feature' is missing, we need to construct it from 'dtype'
                 if "feature" not in obj and "dtype" in obj:
                     import datasets
+
                     # Construct a Value feature from the dtype
                     obj = obj.copy()
                     obj["feature"] = {"_type": "Value", "dtype": obj["dtype"]}
                     # Map shape/length if possible, but Sequence handles length separately
                     # For now let Sequence handle it via the 'length' key if present
-            
+
             return old_generate_from_dict(obj)
 
         datasets.features.features.generate_from_dict = new_generate_from_dict
-            
+
     except Exception as e:
         logging.warning(f"Failed to patch datasets library: {e}")
 
+
 # Apply the patch immediately when module is imported
 _fix_datasets_compatibility()
+
+
+def _patch_lerobot_v3_path_resolution() -> None:
+    original_get_data_file_path = lerobot_dataset.LeRobotDatasetMetadata.get_data_file_path
+    original_get_video_file_path = lerobot_dataset.LeRobotDatasetMetadata.get_video_file_path
+
+    def get_data_file_path(self, ep_index: int):
+        if "{chunk_index" in self.data_path and "{file_index" in self.data_path:
+            episode = self.episodes[ep_index]
+            return Path(
+                self.data_path.format(
+                    chunk_index=int(episode["data/chunk_index"]),
+                    file_index=int(episode["data/file_index"]),
+                )
+            )
+        return original_get_data_file_path(self, ep_index)
+
+    def get_video_file_path(self, ep_index: int, vid_key: str):
+        if self.video_path and "{chunk_index" in self.video_path and "{file_index" in self.video_path:
+            episode = self.episodes[ep_index]
+            return Path(
+                self.video_path.format(
+                    video_key=vid_key,
+                    chunk_index=int(episode[f"videos/{vid_key}/chunk_index"]),
+                    file_index=int(episode[f"videos/{vid_key}/file_index"]),
+                )
+            )
+        return original_get_video_file_path(self, ep_index, vid_key)
+
+    lerobot_dataset.LeRobotDatasetMetadata.get_data_file_path = get_data_file_path
+    lerobot_dataset.LeRobotDatasetMetadata.get_video_file_path = get_video_file_path
+
+
+_patch_lerobot_v3_path_resolution()
 
 
 class Dataset(Protocol[T_co]):
@@ -179,7 +220,7 @@ def create_torch_dataset(
     if repo_id == "fake":
         return FakeDataset(model_config, num_samples=1024)
 
-    dataset_meta = lerobot_dataset.LeRobotDatasetMetadata(repo_id)
+    dataset_meta = _load_lerobot_dataset_metadata(repo_id)
     dataset = lerobot_dataset.LeRobotDataset(
         data_config.repo_id,
         delta_timestamps={
@@ -191,6 +232,94 @@ def create_torch_dataset(
         dataset = TransformedDataset(dataset, [_transforms.PromptFromLeRobotTask(dataset_meta.tasks)])
 
     return dataset
+
+
+def _load_lerobot_dataset_metadata(repo_id: str) -> lerobot_dataset.LeRobotDatasetMetadata:
+    local_root = Path(HF_LEROBOT_HOME) / repo_id
+    info_path = local_root / "meta" / "info.json"
+    if info_path.exists():
+        with info_path.open(encoding="utf-8") as file:
+            info = json.load(file)
+        if str(info.get("codebase_version", "")).startswith("v3"):
+            _ensure_v2_metadata_compatibility(local_root)
+
+    try:
+        return lerobot_dataset.LeRobotDatasetMetadata(repo_id)
+    except RevisionNotFoundError:
+        logging.info(
+            "Dataset %s has no LeRobot version tag; downloading revision 'main' into %s",
+            repo_id,
+            local_root,
+        )
+        snapshot_download(repo_id, repo_type="dataset", revision="main", local_dir=local_root)
+        _ensure_v2_metadata_compatibility(local_root)
+        return lerobot_dataset.LeRobotDatasetMetadata(repo_id)
+
+
+def _ensure_v2_metadata_compatibility(dataset_root: Path) -> None:
+    meta_dir = dataset_root / "meta"
+    tasks_jsonl = meta_dir / "tasks.jsonl"
+    episodes_jsonl = meta_dir / "episodes.jsonl"
+    episode_stats_jsonl = meta_dir / "episodes_stats.jsonl"
+
+    import pandas as pd
+
+    episode_frames = sorted((meta_dir / "episodes").glob("chunk-*/file-*.parquet"))
+    if not episode_frames:
+        raise FileNotFoundError(f"No v3 episode metadata parquet files found under {meta_dir / 'episodes'}")
+
+    episodes_df = pd.concat((pd.read_parquet(path) for path in episode_frames), ignore_index=True)
+
+    task_names: list[str] = []
+    for tasks in episodes_df["tasks"].tolist():
+        for task in tasks.tolist() if hasattr(tasks, "tolist") else list(tasks):
+            if task not in task_names:
+                task_names.append(task)
+
+    _write_jsonl(tasks_jsonl, [{"task_index": idx, "task": task} for idx, task in enumerate(task_names)])
+
+    episodes_records = []
+    for row in episodes_df.to_dict(orient="records"):
+        episode_record = {}
+        for key, value in row.items():
+            if key.startswith("stats/"):
+                continue
+            episode_record[key] = _json_compatible(value)
+        episode_record["episode_index"] = int(episode_record["episode_index"])
+        episode_record["length"] = int(episode_record["length"])
+        episodes_records.append(episode_record)
+    _write_jsonl(episodes_jsonl, episodes_records)
+
+    stats_records = []
+    for row in episodes_df.to_dict(orient="records"):
+        stats: dict[str, dict[str, typing.Any]] = {}
+        for key, value in row.items():
+            if not key.startswith("stats/"):
+                continue
+            feature_name, stat_name = key[len("stats/") :].rsplit("/", 1)
+            stats.setdefault(feature_name, {})[stat_name] = _json_compatible(value)
+        stats_records.append({"episode_index": int(row["episode_index"]), "stats": stats})
+    _write_jsonl(episode_stats_jsonl, stats_records)
+
+
+def _write_jsonl(path: Path, records: Sequence[dict[str, typing.Any]]) -> None:
+    path.parent.mkdir(exist_ok=True, parents=True)
+    with path.open("w", encoding="utf-8") as file:
+        for record in records:
+            file.write(json.dumps(record, ensure_ascii=False))
+            file.write("\n")
+
+
+def _json_compatible(value: typing.Any) -> typing.Any:
+    if hasattr(value, "tolist"):
+        return _json_compatible(value.tolist())
+    if isinstance(value, list):
+        return [_json_compatible(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _json_compatible(item) for key, item in value.items()}
+    if isinstance(value, (np.floating, np.integer)):
+        return value.item()
+    return value
 
 
 def create_rlds_dataset(
