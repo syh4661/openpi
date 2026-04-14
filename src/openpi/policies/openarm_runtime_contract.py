@@ -372,6 +372,47 @@ def runtime_metadata(
     return merged
 
 
+def validate_runtime_metadata(metadata_dict: Mapping[str, object]) -> dict[str, object]:
+    expected = metadata()
+    validated = dict(metadata_dict)
+
+    for key, expected_value in expected.items():
+        if key not in validated:
+            raise ContractError(f"Runtime metadata is missing required field '{key}'.")
+        if validated[key] != expected_value:
+            raise ContractError(f"Runtime metadata field '{key}' must be {expected_value!r}, got {validated[key]!r}.")
+
+    if not isinstance(validated.get("config_name"), str) or not validated["config_name"]:
+        raise ContractError("Runtime metadata must include a non-empty string config_name.")
+
+    if _as_exact_list(validated.get("canonical_input_keys", ())) != list(CANONICAL_INPUT_KEYS):
+        raise ContractError(f"Runtime metadata canonical_input_keys must be {list(CANONICAL_INPUT_KEYS)}.")
+
+    if not isinstance(validated.get("checkpoint_dir"), str) or not validated["checkpoint_dir"]:
+        raise ContractError("Runtime metadata must include a non-empty string checkpoint_dir.")
+
+    if not isinstance(validated.get("checkpoint_format"), str) or not validated["checkpoint_format"]:
+        raise ContractError("Runtime metadata must include a non-empty string checkpoint_format.")
+
+    if not isinstance(validated.get("checkpoint_fingerprint"), str) or not validated["checkpoint_fingerprint"]:
+        raise ContractError("Runtime metadata must include a non-empty string checkpoint_fingerprint.")
+
+    if validated.get("prompt_required") is not True:
+        raise ContractError("Runtime metadata prompt_required must be True.")
+
+    if _as_exact_list(validated.get("state_order", ())) != list(STATE_ORDER):
+        raise ContractError(f"Runtime metadata state_order must be {list(STATE_ORDER)}.")
+
+    if _as_exact_list(validated.get("action_order", ())) != list(ACTION_ORDER):
+        raise ContractError(f"Runtime metadata action_order must be {list(ACTION_ORDER)}.")
+
+    policy_metadata = validated.get("policy_metadata")
+    if policy_metadata is not None and not isinstance(policy_metadata, Mapping):
+        raise ContractError("Runtime metadata policy_metadata must be a mapping when present.")
+
+    return validated
+
+
 def validate_policy_output(result: Mapping[str, object]) -> dict[str, object]:
     if "actions" not in result:
         raise ContractError("Policy result must include an 'actions' entry.")
@@ -384,10 +425,12 @@ def validate_policy_output(result: Mapping[str, object]) -> dict[str, object]:
 class OpenArmRuntimePolicy:
     def __init__(self, policy, *, config_name: str, checkpoint_dir: pathlib.Path | str):
         self._policy = policy
-        self._metadata = runtime_metadata(
-            config_name=config_name,
-            checkpoint_dir=checkpoint_dir,
-            policy_metadata=getattr(policy, "metadata", None),
+        self._metadata = validate_runtime_metadata(
+            runtime_metadata(
+                config_name=config_name,
+                checkpoint_dir=checkpoint_dir,
+                policy_metadata=getattr(policy, "metadata", None),
+            )
         )
 
     def infer(self, observation: Mapping[str, object]) -> dict[str, object]:
