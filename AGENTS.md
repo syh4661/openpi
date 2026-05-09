@@ -28,3 +28,10 @@ Recent history uses short Conventional Commit-style subjects such as `feat: add 
 ## Security & Configuration Tips
 
 Do not commit checkpoints, datasets, secrets, W&B credentials, or local cache paths. Checkpoints are normally downloaded from `gs://openpi-assets` and cached under `~/.cache/openpi`; override with `OPENPI_DATA_HOME` when needed. For RLDS dependencies, use Python 3.11 before running `uv sync --group rlds`.
+
+ ## Compliance
+
+  - W&B (Weights & Biases) is currently compliance-restricted on internal
+    infrastructure. Run with `WANDB_MODE=disabled` per-command. Do not
+    persist W&B credentials in repo files or env files. Long-term migration
+    to TensorBoard is planned as a separate task.
